@@ -1,0 +1,15 @@
+loguru
+wandb
+expecttest
+pre-commit
+nltk
+matplotlib
+markdown2
+weasyprint
+tyro
+torchao
+blobfile
+torchdata>=0.8.0
+datasets>=3.6.0
+mlflow==3.4.0
+pyrsmi
