@@ -1,3 +1,6 @@
 [submodule "training/third_party/Megatron-LM"]
 	path = training/third_party/Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
+[submodule "rl/miles"]
+	path = rl/miles
+	url = https://github.com/radixark/miles.git
