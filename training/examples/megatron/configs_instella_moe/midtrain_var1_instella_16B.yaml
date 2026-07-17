@@ -1,0 +1,114 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:exp_instella_16B_midtrain_var1}
+workspace: ./output
+
+platform:
+  config: platform_azure.yaml
+  overrides:
+    master_sink_level: INFO
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:instella_16B_gated_farskip_overlap}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Instella_MoE_Farskip_Overlap_Midtraining"
+      disable_wandb: true # turn on for wandb logging
+      stderr_sink_level: DEBUG
+      manual_gc: true
+      manual_gc_interval: 100
+
+      moe_router_force_load_balancing: false # debugging only
+      moe_router_dtype: fp32
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      train_iters: 24000
+      eval_iters: 0
+      micro_batch_size: 8
+      global_batch_size: 1024
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 2.0e-4
+      min_lr: 0
+      lr_warmup_iters: 0
+      lr_decay_style: linear
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-6
+      mtp_loss_scaling_factor: 0.1 # reduced for mid-training
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # fusion
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: false
+      moe_use_fused_router_with_aux_score: false
+      fused_padded_mla_attention: false
+
+      # ckpt
+      finetune: true
+      auto_continue_train: true
+      load: /path/to/checkpoints/pretrain # pretrain checkpoint
+      no_load_optim: true
+      no_load_rng: true
+      save: /outputs/path/to/checkpoints/midtrain_instella_16B_gated_farskip_overlap_dolmino_100B_2e-4
+      save_interval: 1000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # midtrain mixture. Each path is a tokenized shard
+      # prefix (.bin/.idx) update to real data mixture paths
+      # real sources will span multiple shards, two sample shards are shown for first source to demonstrate
+      data_cache_path: /data/path/to/midtrain/cache
+      num_dataset_builder_threads: 8
+      train_data_path:
+      # dolmino_mix common_crawl (ingredient1-common_crawl-high-quality_{19,20}_{science_math_and_technology, health, finance_and_business, software, games, entertainment, ...})
+      - /data/path/to/midtrain/dolmino_mix/common_crawl/shard_0000
+      - /data/path/to/midtrain/dolmino_mix/common_crawl/shard_0001
+      # ...
+      # dolmino_mix stack_edu (ingredient1-stack_edu-fim_vigintile_{15..19}_{Python, Java, Cpp, JavaScript, SQL, ...})
+      - /data/path/to/midtrain/dolmino_mix/stack_edu/shard_0000
+      # dolmino_mix olmocr_science_pdfs (ingredient1-olmocr_science_pdfs-high_quality-{science_tech, health, software_dev, ...}-{2e12,2e13})
+      - /data/path/to/midtrain/dolmino_mix/olmocr_science_pdfs/shard_0000
+      # dolmino_mix code-meta-reasoning (ingredient1-code-meta-reasoning)
+      - /data/path/to/midtrain/dolmino_mix/code-meta-reasoning/shard_0000
+      # dolmino_mix math-meta-reasoning (ingredient1-math-meta-reasoning)
+      - /data/path/to/midtrain/dolmino_mix/math-meta-reasoning/shard_0000
+      # dolmino_mix general_reasoning_mix (ingredient1-general_reasoning_mix)
+      - /data/path/to/midtrain/dolmino_mix/general_reasoning_mix/shard_0000
+      # dolmino_mix megamatt (ingredient1-megamatt)
+      - /data/path/to/midtrain/dolmino_mix/megamatt/shard_0000
+      # dolmino_mix stem-heavy-crawl (ingredient1-stem-heavy-crawl)
+      - /data/path/to/midtrain/dolmino_mix/stem-heavy-crawl/shard_0000
+      # dolmino_mix math (ingredient1-dolmino-math, ingredient1-cranemath, ingredient1-tinymath-mind, ingredient1-tinymath-pot)
+      - /data/path/to/midtrain/dolmino_mix/math/shard_0000
+      # dolmino_mix code (ingredient1-cranecode, ingredient1-program_verifiable)
+      - /data/path/to/midtrain/dolmino_mix/code/shard_0000
+      # dolmino_mix instruction (ingredient1-tulu-3-sft, ingredient1-dolmino_1-flan, ingredient1-nemotron-synth-qa, ingredient1-omr-rewrite-fullthoughts)
+      - /data/path/to/midtrain/dolmino_mix/instruction/shard_0000
+      # dolmino_mix qa (ingredient1-reddit_to_flashcards, ingredient1-wiki_to_rcqa-part1, ingredient1-wiki_to_rcqa-part2)
+      - /data/path/to/midtrain/dolmino_mix/qa/shard_0000
+
+      valid_data_path: null
+      test_data_path: null
