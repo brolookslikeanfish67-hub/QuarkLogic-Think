@@ -1,0 +1,127 @@
+# Long-context phase 2: simple farskip continued pre-training with document
+# masking at 64k sequence length, on a math/code-heavy mixture.
+#
+# IMPORTANT: Requires pretrain_docmask.py (NOT the standard pretrain.py).
+
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:exp_instella_16B_long_ctx_phase2}
+workspace: ./output
+
+platform:
+  config: platform_azure.yaml
+  overrides:
+    master_sink_level: INFO
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: instella_16B_gated_farskip_overlap.yaml
+    overrides:
+      use_overlapped_farskip_layer: false
+      use_simple_farskip_layer: true
+
+      # activation checkpointing
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # log
+      wandb_project: Primus_Instella_MoE_Long_Final
+      disable_wandb: true # turn on for wandb logging
+      stderr_sink_level: DEBUG
+
+      manual_gc: true
+      manual_gc_interval: 100
+
+      moe_router_force_load_balancing: false
+      moe_router_dtype: fp32
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # hyperparameters
+      train_iters: 2400
+      eval_iters: 0
+      micro_batch_size: 1
+      global_batch_size: 128
+      seq_length: 65536
+      max_position_embeddings: 65536
+      lr: 1.0e-4
+      min_lr: 0
+      lr_warmup_iters: 0
+      lr_decay_style: linear
+      lr_decay_iters: 2400
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      mtp_num_layers: 0
+      mtp_loss_scaling_factor: 0.0
+      # RoPE theta=8M for all layers
+      rotary_base: 8000000
+      rope_type: yarn
+
+      # === Document masking settings ===
+      reset_position_ids: true
+      create_attention_mask_in_dataloader: false
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # fusion
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: false
+
+      # ckpt
+      finetune: true
+      auto_continue_train: true
+      load: /path/to/checkpoints/long_ctx_phase1 # phase-1 long-context checkpoint
+      no_load_optim: true
+      no_load_rng: true
+      save: /outputs/path/to/checkpoints/long_ctx_phase2_instella_16B
+      save_interval: 400
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch_dist
+
+      # long_ctx mixture. Each path is a tokenized shard
+      # prefix (.bin/.idx) update to real data mixture paths
+      # real sources will span multiple shards, two sample shards are shown for first source to demonstrate
+      data_cache_path: /data/path/to/long_ctx/cache
+      train_data_path:
+      # ingredient1-dolmino-math
+      - /data/path/to/long_ctx/ingredient1-dolmino-math/shard_0000
+      - /data/path/to/long_ctx/ingredient1-dolmino-math/shard_0001
+      # ...
+      # general_reasoning_mix
+      - /data/path/to/long_ctx/general_reasoning_mix/shard_0000
+      # ingredient1-cranemath
+      - /data/path/to/long_ctx/ingredient1-cranemath/shard_0000
+      # megamatt
+      - /data/path/to/long_ctx/megamatt/shard_0000
+      # ingredient1-tinymath (pot, mind)
+      - /data/path/to/long_ctx/ingredient1-tinymath/shard_0000
+      # ingredient1-omr-rewrite-fullthoughts
+      - /data/path/to/long_ctx/ingredient1-omr-rewrite-fullthoughts/shard_0000
+      # math-meta-reasoning
+      - /data/path/to/long_ctx/math-meta-reasoning/shard_0000
+      # instella-gsm8k-synthetic
+      - /data/path/to/long_ctx/instella-gsm8k-synthetic/shard_0000
+      # ingredient1-cranecode
+      - /data/path/to/long_ctx/ingredient1-cranecode/shard_0000
+      # code-meta-reasoning
+      - /data/path/to/long_ctx/code-meta-reasoning/shard_0000
+
+      valid_data_path: null
+      test_data_path: null

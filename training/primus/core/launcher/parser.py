@@ -188,7 +188,7 @@ class PrimusParser(object):
         pass
 
     def parse(self, cli_args: argparse.Namespace) -> PrimusConfig:
-        exp_yaml_cfg = cli_args.config
+        exp_yaml_cfg = getattr(cli_args, "config", None) or getattr(cli_args, "exp", None)
         self.primus_home = Path(os.path.dirname(__file__)).parent.parent.absolute()
         self.parse_exp(exp_yaml_cfg)
         self.parse_meta_info()
