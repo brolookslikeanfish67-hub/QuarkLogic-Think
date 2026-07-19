@@ -1,0 +1,130 @@
+# DPO Config for Instella 16B
+
+# DPO mode is detected by the presence of the dpo_config block below.
+#
+# We use preference data (chosen/rejected pairs) from jsonl
+
+# DPO is ran in two two stages: compute_ref_logprobs: true generates the ref-logprob for reference policy
+# train: compute_ref_logprobs: false - actual DPO training
+
+# DPO-specific config (detected by dpo.py to enable DPO mode)
+dpo_config:
+  # preference jsonl (chosen/rejected pairs)
+  train_data_path: /data/path/to/dpo/preference/dolci-think-dpo-7b-full.jsonl
+  valid_data_path: null
+
+  # false during training; set true for generating the cache
+  compute_ref_logprobs: false
+  # reference log-probs cache: written in first pass used in 2nd pass (training)
+  dpo_ref_logprobs_prefix: /data/path/to/dpo/ref_logprobs/dpo_ref_logprobs.seqlen16384
+
+  beta: 5.0
+  preference_loss_weight: 1.0
+  sft_loss_weight: 0.0
+  preference_average_log_probs: true
+
+  num_epochs: 0.75
+  num_workers: 64
+
+
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:exp_instella_16B_dpo}
+workspace: ./output
+
+platform:
+  config: platform_azure.yaml
+  overrides:
+    master_sink_level: INFO
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: instella_16B_gated_farskip_overlap.yaml
+    overrides:
+      use_overlapped_farskip_layer: false
+      use_simple_farskip_layer: true
+
+      # activation checkpointing (recompute)
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # log
+      wandb_project: Primus_Instella_MoE_DPO
+      disable_wandb: true # turn on for wandb logging
+      stderr_sink_level: DEBUG
+
+      manual_gc: true
+      manual_gc_interval: 100
+
+      moe_router_force_load_balancing: false
+      moe_router_dtype: fp32
+
+      # Routing-freeze for DPO due to small lr and DPO loss
+      moe_aux_loss_coeff: 0
+      moe_router_bias_update_rate: 0
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # hyperparameters
+      train_iters: null
+      eval_iters: 0
+      micro_batch_size: 2 # need chosen and rejected sample pairs
+      global_batch_size: 256
+      seq_length: 16384
+      max_position_embeddings: 16384
+      lr: 8.0e-8
+      min_lr: 0
+      lr_warmup_iters: 0
+      lr_decay_style: linear
+      lr_decay_iters: null
+      weight_decay: 0.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      mtp_num_layers: 0
+      mtp_loss_scaling_factor: 0.0
+      # RoPE theta=8M
+      rotary_base: 8000000
+      rope_type: yarn
+
+      reset_position_ids: false
+      create_attention_mask_in_dataloader: false
+      dataloader_type: single
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # fusion
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: false
+
+      # ckpt
+      finetune: true
+      auto_continue_train: true
+      load: /path/to/checkpoints/sft # SFT checkpoint
+      no_load_optim: true
+      no_load_rng: true
+      save: /outputs/path/to/checkpoints/dpo_instella_16B
+      save_interval: 200
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch_dist
+
+      # DPO preference data is loaded via dpo_config, not these Megatron args
+      data_cache_path: null
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
