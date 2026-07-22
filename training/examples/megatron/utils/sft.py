@@ -26,6 +26,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -995,6 +996,26 @@ def maybe_preprocess_sft_data(sft_config: Dict) -> None:
         data_path = sft_config.get(data_key)
         if not data_path:
             continue
+
+        # Multiple JSONL files: merge into one on rank 0, then treat as a single
+        # file. `awk 1` guarantees a newline between concatenated files. The name
+        # is derived from the raw (CWD-independent) path strings so all ranks
+        # agree on it; only rank 0 reads/writes it, others poll for the .bin/.idx.
+        if isinstance(data_path, list):
+            digest = hashlib.md5(
+                "".join(p.strip() for p in data_path).encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()[:8]
+            merged = f"{os.path.splitext(data_path[0].strip())[0]}.merged.{digest}.jsonl"
+            if rank == 0 and not os.path.exists(merged):
+                print_rank_0(f"> Merging {len(data_path)} SFT JSONL files -> {merged}")
+                with open(merged + ".tmp", "w") as out:
+                    subprocess.run(
+                        ["awk", "1", *[p.strip() for p in data_path]],
+                        stdout=out, check=True,
+                    )
+                os.replace(merged + ".tmp", merged)
+            data_path = merged
 
         # Resolve expected indexed file paths
         tokens_prefix, labels_prefix, meta_path = _resolve_indexed_prefixes(

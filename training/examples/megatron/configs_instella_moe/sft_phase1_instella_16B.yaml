@@ -1,0 +1,124 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:exp_instella_16B_sft}
+workspace: ./output
+
+platform:
+  config: platform_azure.yaml
+  overrides:
+    master_sink_level: INFO
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:instella_16B_gated_farskip_overlap}.yaml
+    overrides:
+      use_overlapped_farskip_layer: false
+      use_simple_farskip_layer: true
+
+      # activation checkpointing
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1
+
+      # log
+      wandb_project: Primus_Instella_MoE_SFT
+      disable_wandb: true # turn on for wandb logging
+      stderr_sink_level: DEBUG
+
+      manual_gc: true
+      manual_gc_interval: 100
+
+      moe_router_force_load_balancing: false
+      moe_router_dtype: fp32
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # hyperparameters
+      train_iters: 12000 # phase 1 sft iterations
+      eval_iters: 0
+      micro_batch_size: 1
+      global_batch_size: 128
+      seq_length: 32768
+      max_position_embeddings: 32768
+      lr: 1.0e-4
+      min_lr: 0
+      lr_warmup_iters: null
+      lr_decay_style: linear
+      lr_decay_iters: 15502 # steps across both stage 1 and stage 2 sft for a continuous schedule
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      mtp_num_layers: 0
+      mtp_loss_scaling_factor: 0.0
+      # RoPE theta=8M
+      rotary_base: 8000000
+      rope_type: yarn
+
+      # === Document masking settings ===
+      reset_position_ids: true
+      create_attention_mask_in_dataloader: false
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # fusion
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: false
+
+      # ckpt
+      finetune: true
+      auto_continue_train: true
+      load: /path/to/checkpoints/long_ctx_phase2 # long-context phase-2 checkpoint
+      no_load_optim: true
+      no_load_rng: true
+      save: /outputs/path/to/checkpoints/sft_instella_16B # this path is shared between phase1 and phase2 via auto-resume
+      save_interval: 200
+      save_retain_interval: 2000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch_dist
+
+      # SFT data is loaded via sft_config (below), not these Megatron args
+      data_cache_path: null
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+# ---------------------------------------------------------------------------
+# SFT-specific config (detected by sft.py to enable SFT mode)
+# ---------------------------------------------------------------------------
+sft_config:
+  # sft mixture. Each path is a tokenized-on-the-fly JSONL dataset file
+  # update to real data mixture paths
+  train_data_path:
+  # dolci-full-nemotron-math-300k-cp-161k-max32k
+  - /data/path/to/sft/dolci-full-nemotron-math-300k-cp-161k-max32k.jsonl
+  # nemotron-cascade2-science-gpt-oss-120b-200k-max32k
+  - /data/path/to/sft/nemotron-cascade2-science-gpt-oss-120b-200k-max32k.jsonl
+  valid_data_path: null
+  test_data_path: null
+
+  enable_packing: true
+  packing_strategy: ffd_disk
+  num_workers: 128
+#  num_epochs: 2
+
+  # Dedicated EOD token
+  # 128042 is a placeholder token in the DeepSeek-V3 vocabulary.
+  eod_token_id: 128042
+  reset_position_ids: true
+  reset_attention_mask: true
