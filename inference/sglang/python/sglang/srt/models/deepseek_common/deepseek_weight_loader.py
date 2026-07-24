@@ -220,7 +220,14 @@ class DeepseekV2WeightLoaderMixin:
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     param = params_dict[name]
-                    weight_loader = param.weight_loader
+                    weight_loader = getattr(param, "weight_loader", None)
+                    if weight_loader is None:
+                        # Param was likely replaced by process_weights_after_loading
+                        # (e.g. AMD aiter MoE shuffle swap). Restore original name
+                        # and continue so we try the next mapping / fall through to
+                        # the safe getattr-with-default path below.
+                        name = name.replace(param_name, weight_name)
+                        continue
                     maybe_executor_submit(
                         executor=executor,
                         futures=futures,
@@ -240,7 +247,10 @@ class DeepseekV2WeightLoaderMixin:
                         if name not in params_dict:
                             continue
                         param = params_dict[name]
-                        weight_loader = param.weight_loader
+                        weight_loader = getattr(param, "weight_loader", None)
+                        if weight_loader is None:
+                            name = name.replace(param_name, weight_name)
+                            continue
                         maybe_executor_submit(
                             executor=executor,
                             futures=futures,

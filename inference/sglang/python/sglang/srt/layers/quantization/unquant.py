@@ -1,3 +1,7 @@
+# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# Adapted from SGLang (https://github.com/sgl-project/sglang), Copyright 2023-2024 SGLang Team.
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List, Optional
@@ -52,6 +56,32 @@ if _use_aiter:
     from aiter import ActivationType
     from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
+
+    def unshuffle_weight(x, layout=(16, 16)):
+        """Inverse of aiter.ops.shuffle.shuffle_weight. Verified bit-exact
+        reversible and per-expert independent for w13/w2 shapes."""
+        IN, IK = layout
+        BK = IK * 2
+        K = 16 // x.element_size()
+        BN = IN
+        x_ = x.view(-1, x.shape[-2] // BN, x.shape[-1] // BK, BK // K, BN, K)
+        x_ = x_.permute(0, 1, 4, 2, 3, 5).contiguous()
+        return x_.view(*x.shape)
+
+    def _make_aiter_weight_loader(orig_loader):
+        """Wrap FusedMoE.weight_loader so Megatron->SGLang weight broadcasts
+        round-trip through the unshuffled layout (unshuffle -> orig loader
+        writes per-expert shard -> reshuffle), keeping the in-memory layout
+        the aiter CK MoE kernel expects."""
+
+        def aiter_weight_loader(param, loaded_weight, *args, **kwargs):
+            param.data.copy_(unshuffle_weight(param.data, (16, 16)))
+            result = orig_loader(param, loaded_weight, *args, **kwargs)
+            param.data.copy_(shuffle_weight(param.data, (16, 16)))
+            return result
+
+        aiter_weight_loader._is_aiter_wrapped = True
+        return aiter_weight_loader
 
 if _is_npu:
     from sglang.srt.hardware_backend.npu.utils import npu_format_cast
@@ -228,16 +258,41 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
         # because aiter CK kernels don't support all GEMM dimensions
         _should_use_aiter_moe = _use_aiter and get_moe_runner_backend().is_auto()
         if _should_use_aiter_moe:
-            layer.w13_weight = torch.nn.Parameter(
-                shuffle_weight(layer.w13_weight.data, (16, 16)),
-                requires_grad=False,
-            )
-            torch.cuda.empty_cache()
-            layer.w2_weight = torch.nn.Parameter(
-                shuffle_weight(layer.w2_weight.data, (16, 16)),
-                requires_grad=False,
-            )
-            torch.cuda.empty_cache()
+            # MILES-FIX: idempotence guard against double-shuffle.
+            if not getattr(layer.w13_weight, "is_shuffled", False):
+                # MILES-FIX: in-place .data.copy_() preserves the Parameter
+                # object and all attached attrs (incl. weight_loader).
+                w13_orig_loader = getattr(layer.w13_weight, "weight_loader", None)
+                w2_orig_loader = getattr(layer.w2_weight, "weight_loader", None)
+
+                layer.w13_weight.data.copy_(
+                    shuffle_weight(layer.w13_weight.data, (16, 16))
+                )
+                layer.w13_weight.requires_grad_(False)
+                layer.w13_weight.is_shuffled = True
+                torch.cuda.empty_cache()
+
+                layer.w2_weight.data.copy_(
+                    shuffle_weight(layer.w2_weight.data, (16, 16))
+                )
+                layer.w2_weight.requires_grad_(False)
+                layer.w2_weight.is_shuffled = True
+                torch.cuda.empty_cache()
+
+                # MILES-FIX: wrap weight_loader for unshuffle/reshuffle round-trip
+                # on Megatron->SGLang weight broadcasts.
+                if w13_orig_loader is not None and not getattr(
+                    w13_orig_loader, "_is_aiter_wrapped", False
+                ):
+                    layer.w13_weight.weight_loader = _make_aiter_weight_loader(
+                        w13_orig_loader
+                    )
+                if w2_orig_loader is not None and not getattr(
+                    w2_orig_loader, "_is_aiter_wrapped", False
+                ):
+                    layer.w2_weight.weight_loader = _make_aiter_weight_loader(
+                        w2_orig_loader
+                    )
 
         # Pack weight for get better performance on CPU
         if _is_cpu and _is_cpu_amx_available:

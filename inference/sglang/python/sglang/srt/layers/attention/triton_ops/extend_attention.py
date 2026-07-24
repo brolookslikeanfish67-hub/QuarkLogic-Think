@@ -1,4 +1,5 @@
 # Copyright 2023-2024 SGLang Team
+# Modifications Copyright © 2026 Advanced Micro Devices, Inc.
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -61,7 +62,9 @@ def _get_block_sizes_for_extend_attention(Lq: int, Lv: int):
 
     # Determine BLOCK_M, BLOCK_N, and num_warps based on hardware
     if _is_hip:
-        BLOCK_M, BLOCK_N = (64, 64)
+        # MI325X has 64KB LDS/CU; (64,64) overflows shared memory on long
+        # sequences, so use (32,32) on the AMD/HIP path.
+        BLOCK_M, BLOCK_N = (32, 32)
         num_warps = 4
     else:
         if _is_cuda and CUDA_CAPABILITY[0] == 12:
