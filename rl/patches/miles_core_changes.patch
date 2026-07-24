@@ -1,0 +1,761 @@
+diff --git a/examples/train_infer_mismatch_helper/mis.py b/examples/train_infer_mismatch_helper/mis.py
+index 30d2d25ef..9e74d2b7c 100644
+--- a/examples/train_infer_mismatch_helper/mis.py
++++ b/examples/train_infer_mismatch_helper/mis.py
+@@ -308,6 +308,81 @@ def compute_mis_weights(
+     return all_weights, all_modified_masks, metrics
+ 
+ 
++# ---------------------------------------------------------------------------
++# Per-sequence train-infer mismatch dump (DIAGNOSTIC; opt-in via
++# INSTELLA_MIS_DUMP_DIR). Read-only over the gathered train/rollout logprobs;
++# does NOT touch the IS/RS math. Fully exception-wrapped so it can never break a
++# training step. Appends one JSONL per rank; each row carries a monotonic
++# micro-batch index so trough steps can be aligned offline against the per-step
++# train/mis_* aggregate metrics (and joined to the train_*.jsonl rollout dump by
++# n_tokens). Only valid for cp_size==1 (our run), where gathered logprobs and
++# the per-rank loss_masks share length; other lengths are skipped defensively.
++# ---------------------------------------------------------------------------
++_MIS_DUMP_MBATCH = 0
++
++
++def _maybe_dump_mis_per_seq(args, train_log_probs, rollout_log_probs, loss_masks):
++    import os
++
++    dump_dir = os.environ.get("INSTELLA_MIS_DUMP_DIR")
++    if not dump_dir:
++        return
++    global _MIS_DUMP_MBATCH
++    try:
++        import json
++        import math
++
++        try:
++            import torch.distributed as dist
++
++            rank = dist.get_rank() if (dist.is_available() and dist.is_initialized()) else 0
++        except Exception:
++            rank = 0
++
++        os.makedirs(dump_dir, exist_ok=True)
++        veto = getattr(args, "rs_veto_threshold", None)
++        log_veto = math.log(veto) if veto else None
++        mb = _MIS_DUMP_MBATCH
++        _MIS_DUMP_MBATCH += 1
++
++        def _safe_exp(x):
++            return math.exp(max(min(x, 20.0), -20.0))
++
++        out_path = os.path.join(dump_dir, f"mis_rank{rank}.jsonl")
++        with open(out_path, "a") as f:
++            for i, (tr, ro, lm) in enumerate(zip(train_log_probs, rollout_log_probs, loss_masks, strict=False)):
++                if tr.shape != ro.shape or tr.shape != lm.shape:
++                    continue  # cp_size>1 length mismatch: skip defensively
++                m = lm.bool()
++                n = int(m.sum().item())
++                if n == 0:
++                    continue
++                lr = (tr - ro)[m].float()
++                mean_lr = float(lr.mean().item())
++                min_lr = float(lr.min().item())
++                max_lr = float(lr.max().item())
++                row = {
++                    "mbatch": mb,
++                    "rank": rank,
++                    "seq_idx": i,
++                    "n_tokens": n,
++                    "mean_log_ratio": round(mean_lr, 5),
++                    "geo_ratio": round(_safe_exp(mean_lr), 6),
++                    "min_token_log_ratio": round(min_lr, 5),
++                    "max_token_log_ratio": round(max_lr, 5),
++                    "min_token_ratio": round(_safe_exp(min_lr), 6),
++                    "max_token_ratio": round(_safe_exp(max_lr), 6),
++                    "frac_tokens_lt_veto": (
++                        round(float((lr < log_veto).float().mean().item()), 5) if log_veto is not None else None
++                    ),
++                    "catastrophic": (bool((lr < log_veto).any().item()) if log_veto is not None else None),
++                }
++                f.write(json.dumps(row) + "\n")
++    except Exception:
++        # Diagnostics must never break a training step.
++        pass
++
++
+ def compute_mis_weights_with_cp(
+     args,
+     *,
+@@ -358,6 +433,10 @@ def compute_mis_weights_with_cp(
+     full_rollout_log_probs = gather_log_probs(rollout_log_probs)
+     full_old_log_probs = gather_log_probs(train_log_probs)
+ 
++    # DIAGNOSTIC (opt-in via INSTELLA_MIS_DUMP_DIR): per-sequence exact IS-ratio
++    # dump. Read-only; never alters the IS/RS computation below.
++    _maybe_dump_mis_per_seq(args, full_old_log_probs, full_rollout_log_probs, loss_masks)
++
+     # Main logic for is (decoupled)
+     is_weights, modified_masks, is_metrics = compute_mis_weights(
+         args=args,
+diff --git a/miles/backends/megatron_utils/actor.py b/miles/backends/megatron_utils/actor.py
+index 54ca4b81a..6c7bef42d 100644
+--- a/miles/backends/megatron_utils/actor.py
++++ b/miles/backends/megatron_utils/actor.py
+@@ -39,7 +39,10 @@ from .parallel import verify_megatron_parallel_state
+ from .replay_utils import get_register_replay_list_func
+ from .update_weight.common import named_params_and_buffers
+ from .update_weight.update_weight_from_distributed.broadcast import UpdateWeightFromDistributed
+-from .update_weight.update_weight_from_distributed.p2p import UpdateWeightP2P
++try:
++    from .update_weight.update_weight_from_distributed.p2p import UpdateWeightP2P
++except ImportError:
++    UpdateWeightP2P = None
+ from .update_weight.update_weight_from_tensor import UpdateWeightFromTensor
+ 
+ logging.getLogger("megatron").setLevel(logging.WARNING)
+diff --git a/miles/backends/megatron_utils/megatron_to_hf/__init__.py b/miles/backends/megatron_utils/megatron_to_hf/__init__.py
+index 90a8f977a..325a8432b 100644
+--- a/miles/backends/megatron_utils/megatron_to_hf/__init__.py
++++ b/miles/backends/megatron_utils/megatron_to_hf/__init__.py
+@@ -10,16 +10,30 @@ from .qwen3_next import convert_qwen3_next_to_hf
+ from .qwen3moe import convert_qwen3moe_to_hf
+ 
+ 
++def _target_vocab_for_hf(args):
++    """Pick the vocab-size to slice embedding/output_layer to when sending to the
++    HF/SGLang side.
++
++    Prefer ``args.padded_vocab_size`` when it is set (either explicitly via
++    ``--padded-vocab-size N`` on the CLI, or auto-derived in
++    ``set_default_megatron_args``).  This matches what the HF model config and
++    the SGLang rollout side actually expect.  Falling back to
++    ``args.vocab_size`` (the unpadded tokenizer base vocab) silently truncates
++    valid embedding rows when the user has explicitly opted for a larger
++    padded vocab — e.g. Instella's 128896 vs the tokenizer's 128000."""
++    return getattr(args, "padded_vocab_size", None) or args.vocab_size
++
++
+ # TODO unify w/ `convert_to_hf`
+ def postprocess_hf_param(args, megatron_param_name, hf_param_name, param):
+-    param = remove_padding(megatron_param_name, param, args.vocab_size)
++    param = remove_padding(megatron_param_name, param, _target_vocab_for_hf(args))
+     # TODO support quant
+     return param
+ 
+ 
+ # TODO optimize code details
+ def convert_to_hf(args, model_name, name, param, quantization_config=None):
+-    param = remove_padding(name, param, args.vocab_size)
++    param = remove_padding(name, param, _target_vocab_for_hf(args))
+ 
+     converted_named_tensors = _convert_to_hf_core(args, model_name, name, param)
+ 
+diff --git a/miles/backends/megatron_utils/megatron_to_hf/deepseekv3.py b/miles/backends/megatron_utils/megatron_to_hf/deepseekv3.py
+index 205b02555..69ab9c7c1 100644
+--- a/miles/backends/megatron_utils/megatron_to_hf/deepseekv3.py
++++ b/miles/backends/megatron_utils/megatron_to_hf/deepseekv3.py
+@@ -60,6 +60,8 @@ def convert_deepseekv3_to_hf(args, name, param):
+ 
+         if rest == "self_attention.linear_proj.weight":
+             return [(f"model.layers.{layer_idx}.self_attn.o_proj.weight", param)]
++        elif rest == "self_attention.linear_gate_proj.weight":
++            return [(f"model.layers.{layer_idx}.self_attn.gate_proj.weight", param)]
+         elif rest == "self_attention.linear_q_proj.weight":
+             return [(f"model.layers.{layer_idx}.self_attn.q_proj.weight", param)]
+         elif rest == "self_attention.linear_q_down_proj.weight":
+diff --git a/miles/backends/megatron_utils/model.py b/miles/backends/megatron_utils/model.py
+index f3a1da27c..ca31297b8 100644
+--- a/miles/backends/megatron_utils/model.py
++++ b/miles/backends/megatron_utils/model.py
+@@ -735,6 +735,53 @@ def save(
+     if should_disable_forward_pre_hook(args):
+         enable_forward_pre_hook(model)
+ 
++    _prune_old_checkpoints(args)
++
++
++def _prune_old_checkpoints(args) -> None:
++    """Keep only the most recent N persistent checkpoints (opt-in, rank-0 only).
++
++    Enabled by INSTELLA_KEEP_LAST_N_CKPT (>0); default 0 = no-op, so this is
++    byte-identical for any run that doesn't set it. Megatron's own
++    save_retain_interval logic only ever rolls a window of 1, so to keep the
++    last N you must (a) set --save-retain-interval == --save-interval to stop
++    Megatron auto-deleting, and (b) set INSTELLA_KEEP_LAST_N_CKPT=N. Symlinks
++    and non `iter_#######` entries are never touched. Any failure is non-fatal.
++    """
++    import os
++    import re
++    import shutil
++
++    try:
++        keep_n = int(os.environ.get("INSTELLA_KEEP_LAST_N_CKPT", "0"))
++    except ValueError:
++        keep_n = 0
++    if keep_n <= 0 or not getattr(args, "save", None):
++        return
++    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
++        return
++
++    try:
++        iter_re = re.compile(r"^iter_(\d{7})$")
++        entries = []
++        for name in os.listdir(args.save):
++            m = iter_re.match(name)
++            if not m:
++                continue
++            path = os.path.join(args.save, name)
++            if os.path.islink(path) or not os.path.isdir(path):
++                continue
++            entries.append((int(m.group(1)), path))
++        entries.sort(key=lambda x: x[0], reverse=True)
++        for _, path in entries[keep_n:]:
++            try:
++                shutil.rmtree(path)
++                logger.info(f"[keep-last-{keep_n}] pruned old checkpoint {path}")
++            except Exception as e:  # noqa: BLE001
++                logger.warning(f"[keep-last-{keep_n}] could not prune {path}: {e}")
++    except Exception as e:  # noqa: BLE001
++        logger.warning(f"[keep-last] checkpoint prune skipped: {e}")
++
+ 
+ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
+     """Save Megatron model in HuggingFace format.
+diff --git a/miles/backends/training_utils/data.py b/miles/backends/training_utils/data.py
+index 55a17e27c..2e408a552 100644
+--- a/miles/backends/training_utils/data.py
++++ b/miles/backends/training_utils/data.py
+@@ -7,6 +7,7 @@ import torch.distributed as dist
+ import torch.nn.functional as F
+ 
+ from miles.utils.data import get_minimum_num_micro_batch_size
++from miles.utils.flops_utils import calculate_fwd_flops
+ from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+ from miles.utils.types import RolloutBatch
+ 
+@@ -407,12 +408,22 @@ def get_data_iterator(
+ 
+         # balance the each micro batch
+         samples = rollout_data["total_lengths"]
++        balance_by_flops = getattr(args, "balance_by_flops", False)
+         # balance the number of mirobatches across steps
+         micro_batch_indices = []
+         for i, num_mbs in enumerate(num_microbatches):
+             start, end = i * num_local_gbs, (i + 1) * num_local_gbs
+             samples = rollout_data["total_lengths"][start:end]
+-            partitions = get_seqlen_balanced_partitions(samples, num_mbs, equal_size=False)
++            # The micro-batch COUNT (num_mbs) above is token-budgeted and DP-MAX-synced,
++            # so it stays identical across ranks. balance_by_flops only changes the
++            # partition METRIC (which sample lands in which micro-batch), weighting by
++            # estimated forward FLOPs (incl. the O(L^2) attention term) instead of token
++            # count to even out per-rank compute under high length variance (slime#2017).
++            if balance_by_flops:
++                weights = [calculate_fwd_flops([sl], args) for sl in samples]
++            else:
++                weights = samples
++            partitions = get_seqlen_balanced_partitions(weights, num_mbs, equal_size=False)
+             for j in range(num_mbs):
+                 for k in range(len(partitions[j])):
+                     partitions[j][k] += start
+diff --git a/miles/backends/training_utils/loss.py b/miles/backends/training_utils/loss.py
+index bea14cbc3..02fc469dd 100644
+--- a/miles/backends/training_utils/loss.py
++++ b/miles/backends/training_utils/loss.py
+@@ -606,7 +606,7 @@ def policy_loss_function(
+         unconcat_tokens=batch["unconcat_tokens"],
+         total_lengths=total_lengths,
+         response_lengths=response_lengths,
+-        with_entropy=args.entropy_coef != 0,
++        with_entropy=args.entropy_coef != 0 or args.log_policy_entropy,
+         max_seq_lens=max_seq_lens,
+     )
+ 
+@@ -771,13 +771,20 @@ def policy_loss_function(
+     ppo_kl = sum_of_sample_mean(ppo_kl)
+ 
+     # entropy loss
+-    if args.entropy_coef != 0:
++    # Compute mean policy entropy whenever it was requested in the forward pass
++    # (i.e. entropy_coef != 0 OR --log-policy-entropy). The raw mean entropy is
++    # always reported as `entropy_loss` for observability; it is only added to
++    # the objective as a bonus when entropy_coef != 0.
++    if args.entropy_coef != 0 or args.log_policy_entropy:
+         entropy = log_probs_and_entropy["entropy"]
+         entropy = torch.cat(entropy, dim=0)
+         entropy_loss = sum_of_sample_mean(entropy)
+-        loss = pg_loss - args.entropy_coef * entropy_loss
+     else:
+         entropy_loss = pg_loss.new_zeros(())
++
++    if args.entropy_coef != 0:
++        loss = pg_loss - args.entropy_coef * entropy_loss
++    else:
+         loss = pg_loss
+ 
+     if args.use_kl_loss:
+diff --git a/miles/ray/rollout.py b/miles/ray/rollout.py
+index ded71b511..b4f0eb4b9 100644
+--- a/miles/ray/rollout.py
++++ b/miles/ray/rollout.py
+@@ -38,7 +38,13 @@ from miles.utils.http_utils import (
+ from miles.utils.iter_utils import group_by
+ from miles.utils.logging_utils import configure_logger
+ from miles.utils.metric_checker import MetricChecker
+-from miles.utils.metric_utils import compute_pass_rate, compute_rollout_step, compute_statistics, dict_add_prefix
++from miles.utils.metric_utils import (
++    _REWARD_PERFECT,
++    compute_pass_rate,
++    compute_rollout_step,
++    compute_statistics,
++    dict_add_prefix,
++)
+ from miles.utils.misc import load_function
+ from miles.utils.ray_utils import Box
+ from miles.utils.seqlen_balancing import get_seqlen_balanced_partitions
+@@ -1152,7 +1158,11 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
+     log_dict = extra_metrics or {}
+     for key in data.keys():
+         rewards = data[key]["rewards"]
+-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
++        # Normalize raw-reward mean by REWARD_SCALE so eval metrics are reported
++        # as accuracy ∈ [0, 1] regardless of whether the reward fn returns 1.0
++        # (default) or a scaled magnitude like 10.0 (OLMo3/Instella convention).
++        # Without this divide, "eval/aime2024 = 7.28" really meant 72.8% accuracy.
++        log_dict[f"eval/{key}"] = (sum(rewards) / len(rewards)) / _REWARD_PERFECT
+         if (samples := data[key].get("samples")) is not None:
+             log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), f"eval/{key}/")
+         if "truncated" in data[key]:
+diff --git a/miles/rollout/generate_utils/prefill_logprobs.py b/miles/rollout/generate_utils/prefill_logprobs.py
+index 680cf3537..7ebd13443 100644
+--- a/miles/rollout/generate_utils/prefill_logprobs.py
++++ b/miles/rollout/generate_utils/prefill_logprobs.py
+@@ -28,6 +28,12 @@ def _build_prefill_scoring_payload(
+             **dict(sampling_params),
+             "max_new_tokens": 0,
+             "temperature": 0,
++            # Neutralize decode-time penalties so the RECOMPUTED logprobs are the
++            # pure model logprobs (penalties are next-token sampling-logit
++            # processors; they must not bias logprob scoring of fixed tokens).
++            "repetition_penalty": 1.0,
++            "frequency_penalty": 0.0,
++            "presence_penalty": 0.0,
+             "skip_special_tokens": False,
+         },
+         "return_logprob": True,
+diff --git a/miles/rollout/inference_rollout/inference_rollout_common.py b/miles/rollout/inference_rollout/inference_rollout_common.py
+index 9f1cc603b..bec9d678e 100644
+--- a/miles/rollout/inference_rollout/inference_rollout_common.py
++++ b/miles/rollout/inference_rollout/inference_rollout_common.py
+@@ -160,6 +160,9 @@ def compute_sampling_params(
+         temperature=temperature,
+         top_p=top_p,
+         top_k=top_k,
++        repetition_penalty=getattr(args, "rollout_repetition_penalty", 1.0),
++        frequency_penalty=getattr(args, "rollout_frequency_penalty", 0.0),
++        presence_penalty=getattr(args, "rollout_presence_penalty", 0.0),
+         max_new_tokens=max_new_tokens,
+         stop=args.rollout_stop,
+         stop_token_ids=args.rollout_stop_token_ids,
+diff --git a/miles/rollout/sglang_rollout.py b/miles/rollout/sglang_rollout.py
+index c00166508..7579fea40 100644
+--- a/miles/rollout/sglang_rollout.py
++++ b/miles/rollout/sglang_rollout.py
+@@ -78,6 +78,9 @@ class GenerateState(metaclass=SingletonMeta):
+             temperature=args.rollout_temperature,
+             top_p=args.rollout_top_p,
+             top_k=args.rollout_top_k,
++            repetition_penalty=getattr(args, "rollout_repetition_penalty", 1.0),
++            frequency_penalty=getattr(args, "rollout_frequency_penalty", 0.0),
++            presence_penalty=getattr(args, "rollout_presence_penalty", 0.0),
+             max_new_tokens=args.rollout_max_response_len,
+             stop=args.rollout_stop,
+             stop_token_ids=args.rollout_stop_token_ids,
+diff --git a/miles/router/router.py b/miles/router/router.py
+index 51194be4c..cb5a20201 100644
+--- a/miles/router/router.py
++++ b/miles/router/router.py
+@@ -78,10 +78,16 @@ class MilesRouter:
+     async def _start_background_health_check(self):
+         asyncio.create_task(self._health_check_loop())
+ 
+-    async def _check_worker_health(self, url):
+-        """Encapsulated health check logic for better maintainability."""
++    async def _check_worker_health(self, url, timeout=60.0):
++        """Encapsulated health check logic for better maintainability.
++
++        MILES_REVIVE_PATCH: timeout bumped from 5s -> 60s. SGLang's FastAPI
++        /health endpoint shares the event loop with active decode/weight-sync
++        work; a busy worker can take 30s+ to answer even when fully healthy.
++        Matches sgl-project/sglang PR #9198 trend toward longer probe timeouts.
++        """
+         try:
+-            response = await self.client.get(f"{url}/health", timeout=5.0)
++            response = await self.client.get(f"{url}/health", timeout=timeout)
+             if response.status_code == 200:
+                 return url, True
+             logger.debug(f"[miles-router] Worker {url} is unhealthy (Status: {response.status_code})")
+@@ -90,35 +96,57 @@ class MilesRouter:
+         return url, False
+ 
+     async def _health_check_loop(self):
+-        """Background loop to monitor worker health and adjust routing pool."""
++        """Background loop to monitor worker health and adjust routing pool.
++
++        MILES_REVIVE_PATCH: previously this loop probed only NON-DEAD workers
++        and never re-checked workers it had killed. In jvv5shdi (May 22 2026)
++        both SGLang engines hit transient probe failures (busy mid-decode);
++        once both were marked DEAD the router raised "No healthy workers" on
++        every request for 3.5h, idling the run. We now also probe DEAD workers
++        and revive them after `revival_threshold` consecutive successes.
++        Ports the revival path from sgl-project/sglang PR #9198 (default
++        consecutive_successes=2). Revived workers may carry stale weights for
++        ~1 step; --update-weights-interval=1 + --use-tis mitigates that.
++        """
+         interval = self.args.rollout_health_check_interval
+         threshold = self.args.miles_router_health_check_failure_threshold
++        revival_threshold = getattr(self.args, "miles_router_health_check_revival_threshold", 2)
++        # URL -> consecutive successes (only meaningful while a worker is DEAD)
++        revival_counts: dict[str, int] = {}
+ 
+         while True:
+             try:
+                 await asyncio.sleep(interval)
+ 
+-                urls = [u for u in self.worker_request_counts if u not in self.dead_workers]
++                urls = list(self.worker_request_counts.keys())
+                 if not urls:
+                     continue
+ 
+                 results = await asyncio.gather(*(self._check_worker_health(url) for url in urls))
+ 
+                 for url, is_healthy in results:
++                    is_dead = url in self.dead_workers
+                     if not is_healthy:
++                        revival_counts[url] = 0
+                         failures = self.worker_failure_counts.get(url, 0) + 1
+                         self.worker_failure_counts[url] = failures
+ 
+-                        if failures >= threshold:
++                        if failures >= threshold and not is_dead:
+                             logger.warning(
+                                 f"[miles-router] Worker {url} failed {threshold} consecutive health checks. Marking as DEAD."
+                             )
+                             self.dead_workers.add(url)
+-                            # TODO (chenyang): Connect back 'dead' workers requires a mechanism to sync
+-                            # model versions to avoid off-policy issues from stale weights, since these
+-                            # dead workers' parameters may not be refitted.
+                     else:
+                         self.worker_failure_counts[url] = 0
++                        if is_dead:
++                            revival_counts[url] = revival_counts.get(url, 0) + 1
++                            if revival_counts[url] >= revival_threshold:
++                                logger.warning(
++                                    f"[miles-router] Worker {url} passed {revival_threshold} consecutive health checks. "
++                                    f"Marking as ALIVE (revived from DEAD pool)."
++                                )
++                                self.dead_workers.discard(url)
++                                revival_counts[url] = 0
+ 
+                 logger.debug(
+                     f"[miles-router] Health check complete. {len(self.worker_request_counts) - len(self.dead_workers)} workers healthy."
+diff --git a/miles/utils/arguments.py b/miles/utils/arguments.py
+index df8317ef5..fa000dcf0 100644
+--- a/miles/utils/arguments.py
++++ b/miles/utils/arguments.py
+@@ -312,6 +312,37 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+             parser.add_argument(
+                 "--rollout-top-k", type=int, default=-1, help="the top-k for the inference engine during rollout."
+             )
++            parser.add_argument(
++                "--rollout-repetition-penalty",
++                type=float,
++                default=1.0,
++                help=(
++                    "Repetition penalty applied by the inference engine DURING decode "
++                    "(SGLang SamplingParams.repetition_penalty). 1.0 = off. Values >1.0 "
++                    "suppress already-emitted tokens, making degenerate loops terminate "
++                    "earlier (cuts the long tail) instead of running to max_new_tokens. "
++                    "Note: this makes the rollout off-policy vs the unpenalized logits; "
++                    "rely on TIS to correct."
++                ),
++            )
++            parser.add_argument(
++                "--rollout-frequency-penalty",
++                type=float,
++                default=0.0,
++                help=(
++                    "Frequency penalty applied by the inference engine during decode "
++                    "(SGLang SamplingParams.frequency_penalty). 0.0 = off."
++                ),
++            )
++            parser.add_argument(
++                "--rollout-presence-penalty",
++                type=float,
++                default=0.0,
++                help=(
++                    "Presence penalty applied by the inference engine during decode "
++                    "(SGLang SamplingParams.presence_penalty). 0.0 = off."
++                ),
++            )
+             parser.add_argument(
+                 "--rollout-max-context-len",
+                 type=int,
+@@ -744,6 +775,20 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                     "dynamic batch size, miles will make 2 micro batches, i.e. [100, 200], [300]."
+                 ),
+             )
++            parser.add_argument(
++                "--balance-by-flops",
++                action="store_true",
++                default=False,
++                help=(
++                    "Balance dynamic micro-batch partitioning by estimated forward FLOPs "
++                    "(via calculate_fwd_flops, which includes the O(L^2) attention term) "
++                    "instead of by token count. The micro-batch COUNT stays token-budgeted "
++                    "(memory), only WHICH samples land in each micro-batch changes. When "
++                    "sequence lengths vary widely this evens out per-rank compute and cuts "
++                    "straggler time (slime#2017: +20-30% MoE train throughput). "
++                    "Requires --use-dynamic-batch-size."
++                ),
++            )
+             parser.add_argument(
+                 "--max-tokens-per-gpu",
+                 type=int,
+@@ -965,6 +1010,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                 help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
+             )
+             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
++            parser.add_argument(
++                "--log-policy-entropy",
++                action="store_true",
++                default=False,
++                help=(
++                    "Compute and log mean policy entropy even when --entropy-coef is 0. "
++                    "Restores the old always-on entropy_loss metric for diagnostics "
++                    "(e.g. mode-collapse monitoring) without adding an entropy bonus to "
++                    "the objective. Incurs an extra per-step entropy reduction over logits."
++                ),
++            )
+             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
+             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
+             parser.add_argument("--normalize-advantages", action="store_true", default=False)
+@@ -2048,6 +2104,9 @@ def miles_validate_args(args):
+         if args.log_probs_max_tokens_per_gpu is None:
+             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
+ 
++    if getattr(args, "balance_by_flops", False):
++        assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
++
+     if args.eps_clip_high is None:
+         args.eps_clip_high = args.eps_clip
+ 
+@@ -2111,9 +2170,9 @@ def miles_validate_args(args):
+             args.offload_train = True
+         if args.offload_rollout is None:
+             args.offload_rollout = True
+-        if args.sglang_enforce_piecewise_cuda_graph:
++        if getattr(args, "sglang_enforce_piecewise_cuda_graph", False):
+             logger.warning("Warning: colocate mode with --sglang-enforce-piecewise-cuda-graph may trigger NVLS OOM.")
+-        if not args.sglang_disable_piecewise_cuda_graph:
++        if hasattr(args, "sglang_disable_piecewise_cuda_graph") and not args.sglang_disable_piecewise_cuda_graph:
+             args.sglang_disable_piecewise_cuda_graph = True
+             logger.info(
+                 "Colocate mode: defaulting --sglang-disable-piecewise-cuda-graph to avoid NVLS OOM. "
+diff --git a/miles/utils/chat_template_utils/tito_tokenizer.py b/miles/utils/chat_template_utils/tito_tokenizer.py
+index 0eb8744f8..9c28aaafa 100644
+--- a/miles/utils/chat_template_utils/tito_tokenizer.py
++++ b/miles/utils/chat_template_utils/tito_tokenizer.py
+@@ -22,7 +22,13 @@ from __future__ import annotations
+ import logging
+ from collections.abc import Iterable
+ from dataclasses import dataclass, field
+-from enum import StrEnum
++try:
++    from enum import StrEnum
++except ImportError:
++    import enum
++
++    class StrEnum(str, enum.Enum):
++        pass
+ from pathlib import Path
+ from typing import Any
+ 
+diff --git a/miles/utils/dumper_utils.py b/miles/utils/dumper_utils.py
+index aea925aa6..66e49e8b2 100644
+--- a/miles/utils/dumper_utils.py
++++ b/miles/utils/dumper_utils.py
+@@ -12,7 +12,12 @@ from typing import Any
+ 
+ import torch
+ import torch.distributed as dist
+-from sglang.srt.debug_utils.dumper import DumperConfig, _get_rank, dumper
++from sglang.srt.debug_utils.dumper import _get_rank, dumper
++
++try:
++    from sglang.srt.debug_utils.dumper import DumperConfig
++except ImportError:
++    from sglang.srt.debug_utils.dumper import _DumperConfig as DumperConfig
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -180,9 +185,21 @@ def _cleanup_dump_dir(dump_dir: Path) -> None:
+         dist.barrier()
+ 
+ 
++def _kv_pairs_to_dict_fallback(raw: list[str] | None) -> dict[str, Any]:
++    if not raw:
++        return {}
++    result: dict[str, Any] = {}
++    for item in raw:
++        if "=" in item:
++            k, v = item.split("=", 1)
++            result[k] = v
++    return result
++
++
+ def _get_phase_override_configs(args: Namespace, phase: DumperPhase) -> dict[str, Any]:
+     raw = getattr(args, f"dumper_{phase.value}")
+-    return {"enable": args.dumper_enable, **DumperConfig._kv_pairs_to_dict(raw)}
++    kv_to_dict = getattr(DumperConfig, "_kv_pairs_to_dict", None) or _kv_pairs_to_dict_fallback
++    return {"enable": args.dumper_enable, **kv_to_dict(raw)}
+ 
+ 
+ def _is_phase_enabled(args: Namespace, phase: DumperPhase) -> bool:
+diff --git a/miles/utils/http_utils.py b/miles/utils/http_utils.py
+index 0aaf79265..639d1fb6e 100644
+--- a/miles/utils/http_utils.py
++++ b/miles/utils/http_utils.py
+@@ -308,8 +308,30 @@ async def post(url, payload, max_retries=60, action="post", headers=None):
+ 
+ 
+ # TODO unify w/ `post` to add retries and remote-execution
+-async def get(url):
+-    response = await _http_client.get(url)
+-    response.raise_for_status()
+-    output = response.json()
++async def get(url, max_retries=60):
++    # Retry on transient network errors (e.g., httpx.ReadError from the in-process
++    # miles router during heavy load / abort cleanup) so a single hiccup does not
++    # tear down the whole rollout. Mirrors the retry behavior of `_post`.
++    retry_count = 0
++    while True:
++        try:
++            response = await _http_client.get(url)
++            response.raise_for_status()
++            output = response.json()
++        except Exception as e:
++            retry_count += 1
++            if isinstance(e, httpx.HTTPStatusError):
++                response_text = e.response.text
++            else:
++                response_text = None
++            logger.info(
++                f"GET error: {e}, retrying... (attempt {retry_count}/{max_retries}, url={url}, response={response_text})"
++            )
++            if retry_count >= max_retries:
++                logger.info(f"Max retries ({max_retries}) reached, failing... (url={url})")
++                raise e
++            await asyncio.sleep(1)
++            continue
++        break
++
+     return output
+diff --git a/miles/utils/metric_utils.py b/miles/utils/metric_utils.py
+index 66292c79e..21c0c9cc5 100644
+--- a/miles/utils/metric_utils.py
++++ b/miles/utils/metric_utils.py
+@@ -1,8 +1,15 @@
+ import math
++import os
+ from typing import Any, Literal
+ 
+ import numpy as np
+ 
++# When rewards are scaled (e.g. REWARD_SCALE=10 for OLMo3/Instella runs where a
++# correct verifiable answer returns 10.0 instead of 1.0), "perfect" is the
++# scaled magnitude. Used by pass@k thresholding and by callers that need to
++# normalize raw-reward means back to accuracy ∈ [0, 1].
++_REWARD_PERFECT = float(os.environ.get("REWARD_SCALE", "1"))
++
+ 
+ def dict_add_prefix(d: dict[str, Any], prefix: str) -> dict[str, Any]:
+     return {f"{prefix}{k}": v for k, v in d.items()}
+@@ -26,7 +33,7 @@ def compute_pass_rate(
+ 
+     log_dict = {}
+     for k in pass_rate_name_list:
+-        num_correct = np.sum(rewards_of_group == 1, axis=1)
++        num_correct = np.sum(rewards_of_group == _REWARD_PERFECT, axis=1)
+         num_samples = np.full(num_groups, group_size)
+ 
+         pass_k_estimates = _estimate_pass_at_k(num_samples, num_correct, k)
+diff --git a/train_async.py b/train_async.py
+index a234bcb6e..35b16a10c 100644
+--- a/train_async.py
++++ b/train_async.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import os
+ 
+ from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+ from miles.utils.arguments import parse_args
+@@ -29,6 +30,23 @@ async def train(args):
+     if args.check_weight_update_equal:
+         await rollout_manager.check_weights.remote(action="compare")
+ 
++    # Eval the freshly loaded weights before any RL updates, so we have a
++    # baseline AIME/MATH score for the SFT checkpoint. Mirrors train.py:70's
++    # `if rollout_id == 0 and not args.skip_eval_before_train:` block, which
++    # the async loop below would otherwise never satisfy (the periodic
++    # `should_run_periodic_action` gate fires for step=N*interval, never
++    # rollout_id=0). Synchronously await so we don't race the first generate.
++    # MILES_EVAL_ON_START=1 forces this baseline eval to also run on RESUME
++    # (start_rollout_id != 0), so the loaded checkpoint is evaluated at the
++    # first step before any RL update. Default (unset) preserves the original
++    # behavior of only evaling at rollout_id == 0 on fresh runs.
++    if (
++        args.eval_interval is not None
++        and not args.skip_eval_before_train
++        and (args.start_rollout_id == 0 or os.environ.get("MILES_EVAL_ON_START") == "1")
++    ):
++        await rollout_manager.eval.remote(args.start_rollout_id)
++
+     # async train loop.
+     rollout_data_next_future = rollout_manager.generate.remote(args.start_rollout_id)
+     for rollout_id in range(args.start_rollout_id, args.num_rollout):
+diff --git a/miles/backends/sglang_utils/sglang_engine.py b/miles/backends/sglang_utils/sglang_engine.py
+index ee76b3872..69c22524a 100644
+--- a/miles/backends/sglang_utils/sglang_engine.py
++++ b/miles/backends/sglang_utils/sglang_engine.py
+@@ -253,8 +253,9 @@ class SGLangEngine(RayActor):
+         try:
+             response.raise_for_status()
+         except requests.exceptions.HTTPError as e:
+-            e.add_note(f"{response.text=}")
+-            raise
++            raise requests.exceptions.HTTPError(
++                f"{e}\nResponse body: {response.text}", response=response
++            ) from None
+         return response.json()
+ 
+     def health_generate(self, timeout: float = 5.0) -> bool:
+diff --git a/miles/backends/training_utils/log_utils.py b/miles/backends/training_utils/log_utils.py
+index 07754b5a6..b0f49764f 100644
+--- a/miles/backends/training_utils/log_utils.py
++++ b/miles/backends/training_utils/log_utils.py
+@@ -9,7 +9,7 @@ import torch.distributed as dist
+ 
+ from miles.utils import train_metric_utils
+ from miles.utils.flops_utils import calculate_fwd_flops
+-from miles.utils.metric_utils import compute_pass_rate, compute_rollout_step
++from miles.utils.metric_utils import _REWARD_PERFECT, compute_pass_rate, compute_rollout_step
+ from miles.utils.types import RolloutBatch
+ 
+ from ...utils import tracking_utils
+@@ -246,7 +246,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
+             correct_loss_masks = []
+             correct_entropy = []
+             for i, raw_reward in enumerate(raw_rewards):
+-                if raw_reward == 1:
++                if raw_reward == _REWARD_PERFECT:
+                     correct_response_lengths.append(response_lengths[i])
+                     correct_total_lengths.append(total_lengths[i])
+                     correct_loss_masks.append(loss_masks[i])
