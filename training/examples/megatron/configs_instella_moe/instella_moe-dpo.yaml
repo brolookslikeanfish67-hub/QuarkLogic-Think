@@ -29,7 +29,7 @@ dpo_config:
 
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:exp_instella_16B_dpo}
+exp_name: ${EXP_NAME:exp_instella_moe_dpo}
 workspace: ./output
 
 platform:
@@ -42,7 +42,7 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
-    model: instella_16B_gated_farskip_overlap.yaml
+    model: instella_moe.yaml
     overrides:
       use_overlapped_farskip_layer: false
       use_simple_farskip_layer: true
@@ -116,7 +116,7 @@ modules:
       load: /path/to/checkpoints/sft # SFT checkpoint
       no_load_optim: true
       no_load_rng: true
-      save: /outputs/path/to/checkpoints/dpo_instella_16B
+      save: /outputs/path/to/checkpoints/instella_moe_dpo
       save_interval: 200
       no_save_optim: null
       no_save_rng: null

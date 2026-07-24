@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:exp_instella_moe_gated_farskip_overlap_pretraining}
+exp_name: ${EXP_NAME:exp_instella_moe_mock_pretraining}
 workspace: ./output
 
 platform:
@@ -14,10 +14,10 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: ${PRIMUS_MODEL:instella_16B_gated_farskip_overlap}.yaml
+    model: ${PRIMUS_MODEL:instella_moe}.yaml
     overrides:
       # log
-      wandb_project: "Primus_Instella_MoE_Farskip_Overlap_Pretrain"
+      wandb_project: "Primus_Instella_MoE_Mock_Pretrain"
       disable_wandb: true # turn on for wandb logging
       stderr_sink_level: DEBUG
       manual_gc: true
@@ -70,7 +70,7 @@ modules:
       load: null
       no_load_optim: null
       no_load_rng: null
-      save: /outputs/path/to/checkpoints/pretrain_instella_16b_gated_farskip_overlap
+      save: /outputs/path/to/checkpoints/instella_moe_mock_pretrain
       save_interval: 1000
       no_save_optim: null
       no_save_rng: null

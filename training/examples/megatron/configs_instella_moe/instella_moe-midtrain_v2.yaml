@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:exp_instella_16B_midtrain_var1}
+exp_name: ${EXP_NAME:exp_instella_moe_midtrain_v2}
 workspace: ./output
 
 platform:
@@ -14,10 +14,10 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: ${PRIMUS_MODEL:instella_16B_gated_farskip_overlap}.yaml
+    model: ${PRIMUS_MODEL:instella_moe}.yaml
     overrides:
       # log
-      wandb_project: "Primus_Instella_MoE_Farskip_Overlap_Midtraining"
+      wandb_project: "Primus_Instella_MoE_Midtraining"
       disable_wandb: true # turn on for wandb logging
       stderr_sink_level: DEBUG
       manual_gc: true
@@ -66,7 +66,7 @@ modules:
       load: /path/to/checkpoints/pretrain # pretrain checkpoint
       no_load_optim: true
       no_load_rng: true
-      save: /outputs/path/to/checkpoints/midtrain_instella_16B_gated_farskip_overlap_dolmino_100B_2e-4
+      save: /outputs/path/to/checkpoints/instella_moe_midtrain_v2
       save_interval: 1000
       no_save_optim: null
       no_save_rng: null
@@ -99,8 +99,8 @@ modules:
       - /data/path/to/midtrain/dolmino_mix/general_reasoning_mix/shard_0000
       # dolmino_mix megamatt (ingredient1-megamatt)
       - /data/path/to/midtrain/dolmino_mix/megamatt/shard_0000
-      # dolmino_mix stem-heavy-crawl (ingredient1-stem-heavy-crawl)
-      - /data/path/to/midtrain/dolmino_mix/stem-heavy-crawl/shard_0000
+      # dolmino_pool stem-heavy-crawl (pulled from the pool for the full stem subset)
+      - /data/path/to/midtrain/dolmino_pool/stem-heavy-crawl/shard_0000
       # dolmino_mix math (ingredient1-dolmino-math, ingredient1-cranemath, ingredient1-tinymath-mind, ingredient1-tinymath-pot)
       - /data/path/to/midtrain/dolmino_mix/math/shard_0000
       # dolmino_mix code (ingredient1-cranecode, ingredient1-program_verifiable)

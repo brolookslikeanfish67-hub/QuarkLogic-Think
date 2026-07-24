@@ -26,7 +26,7 @@ Requirements (same as pretrain_docmask.py):
     - create_attention_mask_in_dataloader: false
 
 Usage:
-    EXP=examples/megatron/configs/instella_16B_sft_yonatan_32k.yaml \\
+    EXP=examples/megatron/configs_instella_moe/instella_moe-sft_phase1.yaml \\
     bash ./examples/run_instella.sh --task sft
 """
 

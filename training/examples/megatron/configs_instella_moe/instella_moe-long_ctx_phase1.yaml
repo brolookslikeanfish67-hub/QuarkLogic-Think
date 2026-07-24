@@ -1,11 +1,10 @@
-# Long-context phase 2: simple farskip continued pre-training with document
-# masking at 64k sequence length, on a math/code-heavy mixture.
-#
-# IMPORTANT: Requires pretrain_docmask.py (NOT the standard pretrain.py).
+# Long-context phase 1: simple farskip continued pre-training with document
+# masking at 64k sequence length.
+# uses pretrain_docmask.py via --task docmask
 
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:exp_instella_16B_long_ctx_phase2}
+exp_name: ${EXP_NAME:exp_instella_moe_long_ctx_phase1}
 workspace: ./output
 
 platform:
@@ -18,7 +17,7 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
-    model: instella_16B_gated_farskip_overlap.yaml
+    model: instella_moe.yaml
     overrides:
       use_overlapped_farskip_layer: false
       use_simple_farskip_layer: true
@@ -42,17 +41,17 @@ modules:
       log_avg_reset_interval: 5
 
       # hyperparameters
-      train_iters: 2400
+      train_iters: 23071
       eval_iters: 0
       micro_batch_size: 1
       global_batch_size: 128
       seq_length: 65536
       max_position_embeddings: 65536
-      lr: 1.0e-4
+      lr: 2.0e-4
       min_lr: 0
-      lr_warmup_iters: 0
+      lr_warmup_iters: 200
       lr_decay_style: linear
-      lr_decay_iters: 2400
+      lr_decay_iters: 23071
       weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
@@ -85,11 +84,11 @@ modules:
       # ckpt
       finetune: true
       auto_continue_train: true
-      load: /path/to/checkpoints/long_ctx_phase1 # phase-1 long-context checkpoint
+      load: /path/to/checkpoints/midtrain_merged # merged midtrain checkpoint
       no_load_optim: true
       no_load_rng: true
-      save: /outputs/path/to/checkpoints/long_ctx_phase2_instella_16B
-      save_interval: 400
+      save: /outputs/path/to/checkpoints/instella_moe_long_ctx_phase1
+      save_interval: 1000
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: false
@@ -100,28 +99,50 @@ modules:
       # real sources will span multiple shards, two sample shards are shown for first source to demonstrate
       data_cache_path: /data/path/to/long_ctx/cache
       train_data_path:
-      # ingredient1-dolmino-math
-      - /data/path/to/long_ctx/ingredient1-dolmino-math/shard_0000
-      - /data/path/to/long_ctx/ingredient1-dolmino-math/shard_0001
-      # ...
-      # general_reasoning_mix
-      - /data/path/to/long_ctx/general_reasoning_mix/shard_0000
-      # ingredient1-cranemath
-      - /data/path/to/long_ctx/ingredient1-cranemath/shard_0000
-      # megamatt
-      - /data/path/to/long_ctx/megamatt/shard_0000
-      # ingredient1-tinymath (pot, mind)
-      - /data/path/to/long_ctx/ingredient1-tinymath/shard_0000
-      # ingredient1-omr-rewrite-fullthoughts
-      - /data/path/to/long_ctx/ingredient1-omr-rewrite-fullthoughts/shard_0000
-      # math-meta-reasoning
-      - /data/path/to/long_ctx/math-meta-reasoning/shard_0000
-      # instella-gsm8k-synthetic
-      - /data/path/to/long_ctx/instella-gsm8k-synthetic/shard_0000
-      # ingredient1-cranecode
-      - /data/path/to/long_ctx/ingredient1-cranecode/shard_0000
       # code-meta-reasoning
       - /data/path/to/long_ctx/code-meta-reasoning/shard_0000
+      - /data/path/to/long_ctx/code-meta-reasoning/shard_0001
+      # ...
+      # common_crawl-high-quality (vigintile0019/0020 x adult_content, art_and_design, crime_and_law, education_and_jobs, ...)
+      - /data/path/to/long_ctx/common_crawl-high-quality/shard_0000
+      # cranecode
+      - /data/path/to/long_ctx/cranecode/shard_0000
+      # cranemath
+      - /data/path/to/long_ctx/cranemath/shard_0000
+      # dolmino_1-flan
+      - /data/path/to/long_ctx/dolmino_1-flan/shard_0000
+      # dolminomath
+      - /data/path/to/long_ctx/dolminomath/shard_0000
+      # reasoning-traces (gemini, llama_nemotron, openthoughts2, qwq)
+      - /data/path/to/long_ctx/reasoning-traces/shard_0000
+      # general_reasoning_mix
+      - /data/path/to/long_ctx/general_reasoning_mix/shard_0000
+      # lc_synth (cwe_s2pdf, rex_s2pdf)
+      - /data/path/to/long_ctx/lc_synth/shard_0000
+      # math-meta-reasoning
+      - /data/path/to/long_ctx/math-meta-reasoning/shard_0000
+      # megamatt
+      - /data/path/to/long_ctx/megamatt/shard_0000
+      # nemotron-synth-qa
+      - /data/path/to/long_ctx/nemotron-synth-qa/shard_0000
+      # olmocr_science_pdfs (high_quality x adult, art_design, crime_law, education_jobs, fashion_beauty, ...)
+      - /data/path/to/long_ctx/olmocr_science_pdfs/shard_0000
+      # omr-rewrite-fullthoughts
+      - /data/path/to/long_ctx/omr-rewrite-fullthoughts/shard_0000
+      # program_verifiable
+      - /data/path/to/long_ctx/program_verifiable/shard_0000
+      # reddit_to_flashcards
+      - /data/path/to/long_ctx/reddit_to_flashcards/shard_0000
+      # stack_edu-fim (vigintile0015/0016/0017/0019 x C, CSharp, Cpp, Go, Java, JavaScript, Markdown, PHP, Python, ...)
+      - /data/path/to/long_ctx/stack_edu-fim/shard_0000
+      # stem-heavy-crawl
+      - /data/path/to/long_ctx/stem-heavy-crawl/shard_0000
+      # tinymath (pot, mind)
+      - /data/path/to/long_ctx/tinymath/shard_0000
+      # tulu-3-sft
+      - /data/path/to/long_ctx/tulu-3-sft/shard_0000
+      # rcqa
+      - /data/path/to/long_ctx/rcqa/shard_0000
 
       valid_data_path: null
       test_data_path: null

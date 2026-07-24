@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:exp_instella_16B_sft}
+exp_name: ${EXP_NAME:exp_instella_moe_sft_phase1}
 workspace: ./output
 
 platform:
@@ -14,7 +14,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: ${PRIMUS_MODEL:instella_16B_gated_farskip_overlap}.yaml
+    model: ${PRIMUS_MODEL:instella_moe}.yaml
     overrides:
       use_overlapped_farskip_layer: false
       use_simple_farskip_layer: true
@@ -84,7 +84,7 @@ modules:
       load: /path/to/checkpoints/long_ctx_phase2 # long-context phase-2 checkpoint
       no_load_optim: true
       no_load_rng: true
-      save: /outputs/path/to/checkpoints/sft_instella_16B # this path is shared between phase1 and phase2 via auto-resume
+      save: /outputs/path/to/checkpoints/instella_moe_sft # this path is shared between phase1 and phase2 via auto-resume
       save_interval: 200
       save_retain_interval: 2000
       no_save_optim: null
