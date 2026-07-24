@@ -1,0 +1,20 @@
+# IFEval + IFBench eval config (temp 0.6 / top_p 0.95, 32k).
+# ${IFEVAL_EVAL} / ${IFBENCH_EVAL} are rendered by the launcher at runtime.
+eval:
+  defaults:
+    max_response_len: 32768
+    top_p: 0.95
+    temperature: 0.6
+  datasets:
+    - name: ifeval
+      path: ${IFEVAL_EVAL}
+      rm_type: ifbench
+      n_samples_per_eval_prompt: 1
+      temperature: 0.6
+      top_p: 0.95
+    - name: ifbench
+      path: ${IFBENCH_EVAL}
+      rm_type: ifbench
+      n_samples_per_eval_prompt: 1
+      temperature: 0.6
+      top_p: 0.95

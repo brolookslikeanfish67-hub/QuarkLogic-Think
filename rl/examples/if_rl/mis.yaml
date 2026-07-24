@@ -1,0 +1,14 @@
+# MIS (Masked Importance Sampling) config for Instella 16B MoE IF Think-RL.
+use_tis: true
+tis_level: "token"
+tis_mode: "truncate"
+tis_lower_bound: 0.5
+tis_upper_bound: 1.5
+tis_batch_normalize: false
+
+use_rs: true
+rs_level: "geometric"
+rs_lower_bound: 0.99
+rs_upper_bound: 1.001
+
+rs_veto_threshold: 1.0e-4

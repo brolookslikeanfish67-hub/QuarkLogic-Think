@@ -1,0 +1,36 @@
+# MOPD eval: AIME 24/25 (math, 32k x16) + IFEval/IFBench (ifbench, 16k x1).
+# ${AIME2024_EVAL}/${AIME2025_EVAL}/${IFEVAL_EVAL}/${IFBENCH_EVAL} rendered by the launcher.
+eval:
+  defaults:
+    max_response_len: 32768
+    top_p: 0.95
+    temperature: 0.6
+  datasets:
+    - name: aime2024
+      path: ${AIME2024_EVAL}
+      rm_type: math
+      n_samples_per_eval_prompt: 16
+      max_response_len: 32768
+      temperature: 0.6
+      top_p: 0.95
+    - name: aime2025
+      path: ${AIME2025_EVAL}
+      rm_type: math
+      n_samples_per_eval_prompt: 16
+      max_response_len: 32768
+      temperature: 0.6
+      top_p: 0.95
+    - name: ifeval
+      path: ${IFEVAL_EVAL}
+      rm_type: ifbench
+      n_samples_per_eval_prompt: 1
+      max_response_len: 16384
+      temperature: 0.6
+      top_p: 0.95
+    - name: ifbench
+      path: ${IFBENCH_EVAL}
+      rm_type: ifbench
+      n_samples_per_eval_prompt: 1
+      max_response_len: 16384
+      temperature: 0.6
+      top_p: 0.95
