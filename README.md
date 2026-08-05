@@ -140,7 +140,7 @@ The phase-2 long-context checkpoint serves as our "Base" Instella-MoE checkpoint
 ### Supervised Fine-Tuning (SFT)
 Supervised Fine-Tuning resumes from the long-context phase-2 checkpoint and trains on the SFT data mixture defined in the config's `sft_config` block.
 We also split the SFT curriculum into two continuous phases: Phase 1 trains on the general SFT mixture, and Phase 2 anneals onto a curated mix at the final phase of training.
-This phase-2 mix is a feedback-driven set of 512K samples selected to target the phase-1 checkpoint's weaknesses, sharpening model capabilities.
+This phase-2 mix is a feedback-driven set of 512K samples selected to target the phase-1 checkpoint's weaknesses, sharpening model capabilities. The curation pipeline that builds this mixture is documented in [`data_curation`](./training/examples/scripts/instella_moe_data_preparation/data_curation).
 
 ```bash
 # Phase 1: general SFT mixture
