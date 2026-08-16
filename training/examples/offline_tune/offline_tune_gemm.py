@@ -157,7 +157,7 @@ def worker(device_id, tune_gemm_results_file_path, task_queue, output_queue):
             result.update(extract_problem_size(match))
 
             if proc.returncode == 0:
-                # extract outout
+                # extract output
                 output = stdout.strip().split("\n")
 
                 tflops = float(output[-4].split(",")[-4]) / 1024  # Gflops -> Tflops
@@ -280,10 +280,13 @@ class OfflineTuneGemm:
                     print("Queue is empty. Finish collecting results.")
                     break
 
-            with open(reports_gemm_result_file_path, mode="w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=results[0].keys())
-                writer.writeheader()
-                writer.writerows(results)
+            if results:
+                with open(reports_gemm_result_file_path, mode="w", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=results[0].keys())
+                    writer.writeheader()
+                    writer.writerows(results)
+            else:
+                print("No results collected to write to CSV.")
 
 
 if __name__ == "__main__":
