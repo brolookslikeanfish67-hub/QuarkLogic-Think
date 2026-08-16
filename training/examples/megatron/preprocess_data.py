@@ -7,16 +7,16 @@
 
 """Processing large data for pretraining."""
 import argparse
-import json
-import math
-import os
-import sys
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 import glob
 import gzip
+import json
+import math
 import multiprocessing
+import os
+import sys
 import time
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir)))
 
 try:
     import nltk
@@ -28,24 +28,20 @@ except ImportError:
     nltk_available = False
 
 from megatron.core.datasets import indexed_dataset
-
-from primus.backends.megatron.training.tokenizer.tokenizer import _add_tokenizer_args
-
-# isort: off
-from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
-
-# isort: on
+from primus.backends.megatron.training.tokenizer.tokenizer import (
+    _add_tokenizer_args,
+    build_tokenizer,
+)
 
 
 # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
 class CustomLanguageVars(PunktLanguageVars):
-
     _period_context_fmt = r"""
-        \S*                          # some word material
-        %(SentEndChars)s             # a potential sentence ending
+        \S*                        # some word material
+        %(SentEndChars)s           # a potential sentence ending
         \s*                       #  <-- THIS is what I changed
         (?=(?P<after_tok>
-            %(NonWord)s              # either other punctuation
+            %(NonWord)s            # either other punctuation
             |
             (?P<next_tok>\S+)     #  <-- Normally you would have \s+ here
         ))"""
@@ -83,7 +79,6 @@ class Encoder(object):
                 )
             else:
                 Encoder.splitter = splitter
-
         else:
             Encoder.splitter = IdentitySplitter()
 
@@ -194,7 +189,8 @@ class Partition(object):
             self.print_processing_stats(i, proc_start, total_bytes_processed)
 
         fin.close()
-        builders[key].finalize(output_idx_files[key])
+        for key in self.args.json_keys:
+            builders[key].finalize(output_idx_files[key])
 
 
 def get_args():
@@ -236,7 +232,7 @@ def get_args():
     group.add_argument(
         "--keep-sequential-samples",
         action="store_true",
-        help="Ensure ordering of samples in .jsonl files is " "preserved when using partitions>1.",
+        help="Ensure ordering of samples in .jsonl files is preserved when using partitions>1.",
     )
 
     args = parser.parse_args()
@@ -323,15 +319,15 @@ def main():
                 total_sample_count += fc + 1
             partition_size = math.ceil(total_sample_count / args.partitions)
 
-        # create .jsonl parition files
+        # create .jsonl partition files
         for idx in range(args.partitions):
             in_ss_out_name = get_file_name(args, idx)
             in_ss_out_names.append(in_ss_out_name)
 
-        # check to see if paritions were already created
+        # check to see if partitions were already created
         partitions_present = check_files_exist(in_ss_out_names, "partition", args.partitions)
 
-        # check to see if paritions with split sentences already created
+        # check to see if partitions with split sentences already created
         split_sentences_present = check_files_exist(in_ss_out_names, "sentence_split", args.partitions)
 
         if not partitions_present and not split_sentences_present:
@@ -371,7 +367,7 @@ def main():
 
     partition = Partition(args, args.workers // args.partitions)
 
-    # check to see if paritions with split sentences already created
+    # check to see if partitions with split sentences already created
     split_sentences_present = check_files_exist(in_ss_out_names, "sentence_split", args.partitions)
 
     # split sentences in partition files
@@ -425,12 +421,11 @@ def main():
         )
 
         for name in in_ss_out_names:
-            parition_output_prefix = name["output_prefix"]
-            full_partition_output_prefix = "{}_{}_{}".format(parition_output_prefix, key, level)
+            partition_output_prefix = name["output_prefix"]
+            full_partition_output_prefix = "{}_{}_{}".format(partition_output_prefix, key, level)
             builders[key].add_index(full_partition_output_prefix)
         builders[key].finalize(output_idx_files[key])
 
 
 if __name__ == "__main__":
-
     main()
